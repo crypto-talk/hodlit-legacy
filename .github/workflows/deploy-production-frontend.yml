@@ -1,0 +1,107 @@
+name: Deploy production frontend to AWS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - frontend/**
+      - .github/workflows/deploy-production-frontend.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hodlit-aws-production-frontend
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: 183603739306.dkr.ecr.ap-northeast-2.amazonaws.com/hodlit-prod-frontend
+
+jobs:
+  publish:
+    if: github.repository == 'crypto-talk/hodlit' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.HODLIT_AWS_PRODUCTION_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::183603739306:role/hodlit-frontend-publish
+      - uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - name: Build and publish the Next.js image
+        id: image
+        env:
+          NEXT_PUBLIC_API_URL: https://api.hodlit.xyz
+          NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${{ vars.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID }}
+          NEXT_PUBLIC_ANALYTICS_ENABLED: ${{ vars.NEXT_PUBLIC_ANALYTICS_ENABLED }}
+          NEXT_PUBLIC_ANALYTICS_ENV: ${{ vars.NEXT_PUBLIC_ANALYTICS_ENV }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
+        run: |
+          image="$ECR_REPOSITORY:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker build --tag "$image" \
+            --build-arg NEXT_PUBLIC_API_URL \
+            --build-arg NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID \
+            --build-arg NEXT_PUBLIC_ANALYTICS_ENABLED \
+            --build-arg NEXT_PUBLIC_ANALYTICS_ENV \
+            --build-arg NEXT_PUBLIC_POSTHOG_KEY \
+            --build-arg NEXT_PUBLIC_POSTHOG_HOST frontend
+          docker push "$image"
+          ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")
+          digest=${ref##*@}
+          [[ $digest =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::183603739306:role/hodlit-frontend-deploy
+      - name: Deploy by image digest to Lightsail
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+          INSTANCE_ID: ${{ vars.HODLIT_FRONTEND_SSM_NODE }}
+        run: |
+          [[ $INSTANCE_ID =~ ^mi-[a-f0-9]+$ ]]
+          [[ $IMAGE_DIGEST =~ ^sha256:[a-f0-9]{64}$ ]]
+          parameters=$(jq -cn --arg digest "$IMAGE_DIGEST" '{ImageDigest:[$digest]}')
+          command_id=$(aws ssm send-command --instance-ids "$INSTANCE_ID" \
+            --document-name HodlitDeployFrontend --parameters "$parameters" \
+            --query 'Command.CommandId' --output text)
+          for attempt in {1..60}; do
+            if ! status=$(aws ssm get-command-invocation --command-id "$command_id" \
+              --instance-id "$INSTANCE_ID" --query Status --output text 2>&1); then
+              if [[ $status == *InvocationDoesNotExist* ]]; then
+                sleep 5
+                continue
+              fi
+              printf '%s\n' "$status" >&2
+              exit 1
+            fi
+            case "$status" in
+              Success) exit 0 ;;
+              Pending|InProgress|Delayed) sleep 5 ;;
+              *)
+                aws ssm get-command-invocation --command-id "$command_id" \
+                  --instance-id "$INSTANCE_ID" --query '{status:Status,error:StandardErrorContent}'
+                exit 1 ;;
+            esac
+          done
+          printf 'Timed out waiting for SSM command %s\n' "$command_id" >&2
+          exit 1

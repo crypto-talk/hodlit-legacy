@@ -1,0 +1,11 @@
+origin-frontend.hodlit.xyz {
+	@cloudfront header X-Hodlit-Origin {$HODLIT_ORIGIN_KEY}
+	handle @cloudfront {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up -X-Hodlit-Origin
+			header_up X-Forwarded-Host hodlit.xyz
+			header_up X-Forwarded-Proto https
+		}
+	}
+	respond 403
+}

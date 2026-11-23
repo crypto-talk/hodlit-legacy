@@ -1,24 +1,34 @@
-FROM node:22.13-alpine AS dependencies
+FROM node:22.22.2-alpine AS node
 WORKDIR /app
-RUN corepack enable
+
+FROM node AS dependencies
+RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-FROM node:22.13-alpine AS build
-WORKDIR /app
+FROM dependencies AS build
 ARG NEXT_PUBLIC_API_URL=""
-ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-COPY --from=dependencies /app/node_modules ./node_modules
+ARG NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=""
+ARG NEXT_PUBLIC_ANALYTICS_ENABLED=""
+ARG NEXT_PUBLIC_ANALYTICS_ENV=""
+ARG NEXT_PUBLIC_POSTHOG_KEY=""
+ARG NEXT_PUBLIC_POSTHOG_HOST=""
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} \
+    NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=${NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID} \
+    NEXT_PUBLIC_ANALYTICS_ENABLED=${NEXT_PUBLIC_ANALYTICS_ENABLED} \
+    NEXT_PUBLIC_ANALYTICS_ENV=${NEXT_PUBLIC_ANALYTICS_ENV} \
+    NEXT_PUBLIC_POSTHOG_KEY=${NEXT_PUBLIC_POSTHOG_KEY} \
+    NEXT_PUBLIC_POSTHOG_HOST=${NEXT_PUBLIC_POSTHOG_HOST} \
+    NEXT_TELEMETRY_DISABLED=1
 COPY . .
-RUN corepack enable && pnpm run build
+RUN pnpm run build
 
-FROM node:22.13-alpine AS runtime
-WORKDIR /app
-RUN corepack enable
+FROM node AS runtime
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
+ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=build --chown=node:node /app ./
 USER node
 EXPOSE 3000
-CMD ["pnpm", "run", "start"]
+CMD ["node", "node_modules/next/dist/bin/next", "start"]
