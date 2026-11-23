@@ -1,0 +1,24 @@
+name: Deploy development frontend to Umbrel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hodlit-umbrel-development
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'crypto-talk/hodlit' && github.ref == 'refs/heads/main'
+    runs-on: hodlit-umbrel-dev
+    timeout-minutes: 45
+    steps:
+      - name: Check out Hodlit frontend
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Deploy and verify the development frontend
+        run: /home/umbrel/compose/hodlit-dev/deploy-component.sh frontend "$GITHUB_WORKSPACE"
